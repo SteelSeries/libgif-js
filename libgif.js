@@ -956,7 +956,7 @@
                     if (!initialized) init();
                 };
                 h.onload = function(e) {
-                    if (this.status != 200) {
+                    if (this.status != 200 && this.status != 0) {
                         doLoadError('xhr - response');
                     }
                     // emulating response field for IE9
