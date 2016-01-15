@@ -582,6 +582,10 @@
             }; // Fake header.
             frames = [];
             drawError();
+
+            if (error_callback) {
+                error_callback(loadError);
+            }
         };
 
         var doHdr = function (_hdr) {
@@ -891,11 +895,14 @@
         var canvas, ctx, toolbar, tmpCanvas;
         var initialized = false;
         var load_callback = false;
+        var error_callback = false;
 
-        var load_setup = function(callback) {
+        var load_setup = function(callback, errorCallback) {
             if (loading) return false;
             if (callback) load_callback = callback;
             else load_callback = false;
+            if (errorCallback) error_callback = errorCallback;
+            else error_callback = false;
 
             loading = true;
             frames = [];
@@ -923,8 +930,8 @@
             get_auto_play    : function() { return options.auto_play },
             get_length       : function() { return player.length() },
             get_current_frame: function() { return player.current_frame() },
-            load_url: function(src,callback){
-                if (!load_setup(callback)) return;
+            load_url: function(src, callback, errorCallback){
+                if (!load_setup(callback, errorCallback)) return;
 
                 var h = new XMLHttpRequest();
                 // new browsers (XMLHttpRequest2-compliant)
@@ -970,11 +977,11 @@
                 h.onerror = function() { doLoadError('xhr'); };
                 h.send();
             },
-            load: function (callback) {
-                this.load_url(gif.getAttribute('rel:animated_src') || gif.src,callback);
+            load: function (callback, errorCallback) {
+                this.load_url(gif.getAttribute('rel:animated_src') || gif.src, callback, errorCallback);
             },
-            load_raw: function(arr, callback) {
-                if (!load_setup(callback)) return;
+            load_raw: function(arr, callback, errorCallback) {
+                if (!load_setup(callback, errorCallback)) return;
                 if (!initialized) init();
                 stream = new Stream(arr);
                 setTimeout(doParse, 0);
@@ -985,5 +992,3 @@
 
     return SuperGif;
 }));
-
-
