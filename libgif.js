@@ -129,12 +129,11 @@
     };
 
     var lzwDecode = function (minCodeSize, data) {
-        // TODO: Now that the GIF parser is a bit different, maybe this should get an array of bytes instead of a String?
         var pos = 0; // Maybe this streaming thing should be merged with the Stream?
         var readCode = function (size) {
             var code = 0;
             for (var i = 0; i < size; i++) {
-                if (data.charCodeAt(pos >> 3) & (1 << (pos & 7))) {
+                if (data[pos >> 3] & (1 << (pos & 7))) {
                     code |= 1 << i;
                 }
                 pos++;
@@ -142,28 +141,68 @@
             return code;
         };
 
-        var output = [];
 
         var clearCode = 1 << minCodeSize;
         var eoiCode = clearCode + 1;
 
         var codeSize = minCodeSize + 1;
 
-        var dict = [];
+        var outputBlockSize = 4096,
+            bufferBlockSize = 4096;
 
-        var clear = function () {
+        var output = new Uint8Array(outputBlockSize),
+            buffer = new Uint8Array(bufferBlockSize),
             dict = [];
-            codeSize = minCodeSize + 1;
-            for (var i = 0; i < clearCode; i++) {
-                dict[i] = [i];
-            }
-            dict[clearCode] = [];
-            dict[eoiCode] = null;
 
+        var bufferOffset = 0,
+            outputOffset = 0;
+
+
+        var fill = function () {
+            for (var i = 0; i < clearCode; i++) {
+                dict[i] = new Uint8Array(1);
+                dict[i][0] = i;
+            }
+            dict[clearCode] = new Uint8Array(0);
+            dict[eoiCode] = null;
+        }
+        var clear = function () {
+            var keep = clearCode + 2;
+            dict.splice(keep, dict.length - keep);
+            codeSize = minCodeSize + 1;
+            bufferOffset = 0;
         };
+
+        // Block allocators, double block size each time
+        var enlargeOutput = function() {
+            var outputSize = output.length + outputBlockSize;
+            var newoutput = new Uint8Array(outputSize);
+            newoutput.set(output);
+            output = newoutput;
+            outputBlockSize = outputBlockSize << 1;
+        }
+        var enlargeBuffer = function() {
+            var bufferSize = buffer.length + bufferBlockSize;
+            var newbuffer = new Uint8Array(bufferSize);
+            newbuffer.set(buffer);
+            buffer = newbuffer;
+            bufferBlockSize = bufferBlockSize << 1;
+        }
+
+        var pushCode = function(code, last) {
+            var newlength = dict[last].byteLength + 1;
+            while (bufferOffset + newlength > buffer.length) enlargeBuffer();
+            var newdict = buffer.subarray(bufferOffset, bufferOffset + newlength);
+            newdict.set(dict[last]);
+            newdict[newlength-1] = dict[code][0];
+            bufferOffset += newlength;
+            dict.push(newdict);
+        }
 
         var code;
         var last;
+
+        fill();
 
         while (true) {
             last = code;
@@ -177,14 +216,18 @@
 
             if (code < dict.length) {
                 if (last !== clearCode) {
-                    dict.push(dict[last].concat(dict[code][0]));
+                    pushCode(code, last);
                 }
             }
             else {
                 if (code !== dict.length) throw new Error('Invalid LZW code.');
-                dict.push(dict[last].concat(dict[last][0]));
+                pushCode(last, last);
             }
-            output.push.apply(output, dict[code]);
+
+            var newsize = dict[code].length;
+            while (outputOffset + newsize > output.length) enlargeOutput();
+            output.set(dict[code], outputOffset);
+            outputOffset += newsize;
 
             if (dict.length === (1 << codeSize) && codeSize < 12) {
                 // If we're at the last code and codeSize is 12, the next code will be a clearCode, and it'll be 12 bits long.
@@ -194,7 +237,7 @@
 
         // I don't know if this is technically an error, but some GIFs do it.
         //if (Math.ceil(pos / 8) !== data.length) throw new Error('Extraneous LZW bytes.');
-        return output;
+        return output.subarray(0, outputOffset);
     };
 
 
@@ -212,13 +255,25 @@
         };
 
         var readSubBlocks = function () {
-            var size, data;
-            data = '';
+            var size, data, offset = 0;
+            var bufsize = 8192;
+            data = new Uint8Array(bufsize);
+
+            var resizeBuffer = function() { 
+                var newdata = new Uint8Array(data.length + bufsize);
+                newdata.set(data);
+                data = newdata;
+            }
+
             do {
                 size = st.readByte();
-                data += st.read(size);
+
+                // Increase buffer size if this would exceed our current size
+                while (offset + size > data.length) resizeBuffer();
+                data.set(st.readBytes(size), offset);
+                offset += size;
             } while (size !== 0);
-            return data;
+            return data.subarray(0, offset); // truncate any excess buffer space
         };
 
         var parseHeader = function () {
@@ -583,6 +638,10 @@
             }; // Fake header.
             frames = [];
             drawError();
+
+            if (error_callback) {
+                error_callback(loadError);
+            }
         };
 
         var doHdr = function (_hdr) {
@@ -661,15 +720,18 @@
             var imgData = frame.getImageData(img.leftPos, img.topPos, img.width, img.height);
 
             //apply color table colors
-            img.pixels.forEach(function (pixel, i) {
+            for (var i = 0; i < img.pixels.length; i++) {
+                var pixel = img.pixels[i];
                 // imgData.data === [R,G,B,A,R,G,B,A,...]
                 if (pixel !== transparency) {
-                    imgData.data[i * 4 + 0] = ct[pixel][0];
-                    imgData.data[i * 4 + 1] = ct[pixel][1];
-                    imgData.data[i * 4 + 2] = ct[pixel][2];
-                    imgData.data[i * 4 + 3] = 255; // Opaque.
+                    var pix = ct[pixel];
+                    var idx = i * 4;
+                    imgData.data[idx    ] = pix[0];
+                    imgData.data[idx + 1] = pix[1];
+                    imgData.data[idx + 2] = pix[2];
+                    imgData.data[idx + 3] = 255; // Opaque.
                 }
-            });
+            }
 
             frame.putImageData(imgData, img.leftPos, img.topPos);
 
@@ -871,8 +933,10 @@
             div.appendChild(canvas);
             div.appendChild(toolbar);
 
-            parent.insertBefore(div, gif);
-            parent.removeChild(gif);
+            if (parent) {
+                parent.insertBefore(div, gif);
+                parent.removeChild(gif);
+            }
 
             if (options.c_w && options.c_h) setSizes(options.c_w, options.c_h);
             initialized=true;
@@ -892,11 +956,14 @@
         var canvas, ctx, toolbar, tmpCanvas;
         var initialized = false;
         var load_callback = false;
+        var error_callback = false;
 
-        var load_setup = function(callback) {
+        var load_setup = function(callback, errorCallback) {
             if (loading) return false;
             if (callback) load_callback = callback;
             else load_callback = false;
+            if (errorCallback) error_callback = errorCallback;
+            else error_callback = false;
 
             loading = true;
             frames = [];
@@ -924,8 +991,9 @@
             get_auto_play    : function() { return options.auto_play },
             get_length       : function() { return player.length() },
             get_current_frame: function() { return player.current_frame() },
-            load_url: function(src,callback){
-                if (!load_setup(callback)) return;
+            get_frame        : function(i) { return frames[i]; },
+            load_url: function(src, callback, errorCallback){
+                if (!load_setup(callback, errorCallback)) return;
 
                 var h = new XMLHttpRequest();
                 // new browsers (XMLHttpRequest2-compliant)
@@ -950,7 +1018,7 @@
                     if (!initialized) init();
                 };
                 h.onload = function(e) {
-                    if (this.status != 200) {
+                    if (this.status != 200 && (this.status != 0 || this.responseText.length == 0)) {
                         doLoadError('xhr - response');
                     }
                     // emulating response field for IE9
@@ -958,7 +1026,7 @@
                         this.response = new VBArray(this.responseText).toArray().map(String.fromCharCode).join('');
                     }
                     var data = this.response;
-                    if (data.toString().indexOf("ArrayBuffer") > 0) {
+                    if (data instanceof ArrayBuffer) {
                         data = new Uint8Array(data);
                     }
 
@@ -971,11 +1039,11 @@
                 h.onerror = function() { doLoadError('xhr'); };
                 h.send();
             },
-            load: function (callback) {
-                this.load_url(gif.getAttribute('rel:animated_src') || gif.src,callback);
+            load: function (callback, errorCallback) {
+                this.load_url(gif.getAttribute('rel:animated_src') || gif.src, callback, errorCallback);
             },
-            load_raw: function(arr, callback) {
-                if (!load_setup(callback)) return;
+            load_raw: function(arr, callback, errorCallback) {
+                if (!load_setup(callback, errorCallback)) return;
                 if (!initialized) init();
                 stream = new Stream(arr);
                 setTimeout(doParse, 0);
@@ -986,5 +1054,3 @@
 
     return SuperGif;
 }));
-
-
